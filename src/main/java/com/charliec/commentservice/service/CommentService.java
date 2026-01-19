@@ -4,6 +4,8 @@ import com.charliec.commentservice.api.request.CreateCommentRequest;
 import com.charliec.commentservice.domain.entity.Comment;
 import com.charliec.commentservice.repository.CommentRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -19,7 +21,6 @@ public class CommentService {
     public Comment createComment(String contentType, Long contentId, CreateCommentRequest req) {
         Long parentId = req.parentId();
 
-        // 1) 先创建 comment（rootId 可能需要二次更新）
         Comment comment = Comment.builder()
                 .contentType(contentType)
                 .contentId(contentId)
@@ -29,12 +30,11 @@ public class CommentService {
                 .status(STATUS_ACTIVE)
                 .build();
 
-        // 2) 二级评论：校验 parent，设置 rootId = parent.rootId（或 parent.id）
+        // 二级评论
         if (parentId != null) {
             Comment parent = commentRepository.findByIdAndStatusForUpdate(parentId, STATUS_ACTIVE)
                     .orElseThrow(() -> new IllegalArgumentException("Parent comment not found or inactive"));
 
-            // 同一内容下才能回复（非常重要）
             if (!parent.getContentType().equals(contentType) || !parent.getContentId().equals(contentId)) {
                 throw new IllegalArgumentException("Parent comment does not belong to the same content");
             }
@@ -44,16 +44,32 @@ public class CommentService {
 
             Comment saved = commentRepository.save(comment);
 
-            // 对 root 的 replyCount + 1（可选：也对 parent +1）
+            // root 总回复数 +1
             commentRepository.incrementReplyCount(rootId);
+
+            // parent 直接回复数 +1（当 parent != root 时才需要）
+            if (!parentId.equals(rootId)) {
+                commentRepository.incrementReplyCount(parentId);
+            }
 
             return saved;
         }
 
-        // 3) 一级评论：先保存拿到 id，再把 rootId 设置为自己的 id
+        // 一级评论：先保存拿 id，再把 rootId 设置为自己
         Comment saved = commentRepository.save(comment);
         saved.setRootId(saved.getId());
-        // 保存 rootId 更新（仍在同一事务里）
         return commentRepository.save(saved);
+    }
+
+    @Transactional(readOnly = true)
+    public Page<Comment> listRootComments(String contentType, Long contentId, Pageable pageable) {
+        return commentRepository.findByContentTypeAndContentIdAndParentIdIsNullAndStatus(
+                contentType, contentId, STATUS_ACTIVE, pageable
+        );
+    }
+
+    @Transactional(readOnly = true)
+    public Page<Comment> listReplies(Long rootId, Pageable pageable) {
+        return commentRepository.findByParentIdAndStatus(rootId, STATUS_ACTIVE, pageable);
     }
 }
